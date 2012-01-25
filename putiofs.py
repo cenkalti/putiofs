@@ -127,13 +127,14 @@ class PutioFS(LoggingMixIn, Operations):
     #         self.files[path] = dict(st_mode=(S_IFDIR | mode), st_nlink=2,
     #                 st_size=0, st_ctime=time(), st_mtime=time(), st_atime=time())
     #         self.files['/']['st_nlink'] += 1
-    #     
-    #     def open(self, path, flags):
-    #         self.fd += 1
-    #         return self.fd
-    #     
-    #     def read(self, path, size, offset, fh):
-    #         return self.data[path][offset:offset + size]
+
+    def open(self, path, flags):
+        self.fd += 1
+        return self.fd
+    
+    def read(self, path, size, offset, fh):
+        f = self._get_file_by_path(path)
+        return f.download(range=(offset, offset+size))
     
     def readdir(self, path, fh):
         f = self._get_file_by_path(path)
@@ -141,17 +142,22 @@ class PutioFS(LoggingMixIn, Operations):
         return ['.', '..'] + [str(c) for c in children]
     
     def release(self, path, fh):
-        f = self.temporary_files[path]
-        temppath = f.name
-        f.close()
-        
         try:
-            filename = os.path.basename(path)
-            newfile = client.File.upload(temppath, filename)
-            self._add_to_files(newfile)
-        finally:
-            os.remove(temppath)
-            del self.temporary_files[path]
+            f = self.temporary_files[path]
+        except KeyError:
+            # no need to close files which are opened for reading
+            pass
+        else:
+            temppath = f.name
+            f.close()
+        
+            try:
+                filename = os.path.basename(path)
+                newfile = client.File.upload(temppath, filename)
+                self._add_to_files(newfile)
+            finally:
+                os.remove(temppath)
+                del self.temporary_files[path]
 
     # def rename(self, old, new):
     #         self.files[new] = self.files.pop(old)
