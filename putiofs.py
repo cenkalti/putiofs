@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 
+import os
+import logging
 import argparse
-from collections import defaultdict
-from errno import ENOENT
+
+from errno import ENOENT, EROFS
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
 from time import time
+from tempfile import NamedTemporaryFile
 from pdb import set_trace as st
 
 import putio2
@@ -17,7 +20,8 @@ class PutioFS(LoggingMixIn, Operations):
     """Implementation of put.io filesystem"""
     
     def __init__(self):
-        #self.fd = 0
+        self.fd = 0
+        self.temporary_files = {} # buffer area before uploading {path: TemporaryFile}
         self._fetch_files()
     
     def _fetch_files(self):
@@ -34,15 +38,7 @@ class PutioFS(LoggingMixIn, Operations):
         
         # attact stat object to files
         for f in self.files.values():
-            if f.content_type == 'application/x-directory':
-                mode = (S_IFDIR | 0700)
-                size = 0
-            else:
-                mode = (S_IFREG | 0400)
-                size = f.size
-                
-            f.stat = dict(st_mode=mode , st_ctime=now,
-                st_mtime=now, st_atime=now, st_nlink=2, st_size=size)
+            self._attach_stat(f)
         
         # same files by indexed with path
         self.path_files = {}
@@ -50,6 +46,23 @@ class PutioFS(LoggingMixIn, Operations):
             path = self._construct_path(f)
             self.path_files[path] = f
     
+    def _add_to_files(self, file):
+        self.files[file.id] = file
+        path = self._construct_path(file)
+        self.path_files[path] = file
+        self._attach_stat(file)
+    
+    def _attach_stat(self, file):
+        if file.content_type == 'application/x-directory':
+            mode = (S_IFDIR | 0700)
+            size = 0
+        else:
+            mode = (S_IFREG | 0400)
+            size = file.size
+            
+        file.stat = dict(st_mode=mode , st_ctime=now,
+            st_mtime=now, st_atime=now, st_nlink=2, st_size=size)
+            
     def _construct_path(self, file):
         '''For given file, returns the path to the mount point'''
         
@@ -85,15 +98,28 @@ class PutioFS(LoggingMixIn, Operations):
     #         self.files[path]['st_uid'] = uid
     #         self.files[path]['st_gid'] = gid
     #     
-    #     def create(self, path, mode):
-    #         self.files[path] = dict(st_mode=(S_IFREG | mode), st_nlink=1,
-    #             st_size=0, st_ctime=time(), st_mtime=time(), st_atime=time())
-    #         self.fd += 1
-    #         return self.fd
+    def create(self, path, mode):
+        if path in self.temporary_files:
+            raise FuseOSError(EROFS)
+        
+        self.temporary_files[path] = NamedTemporaryFile(delete=False)
+
+        self.fd += 1
+        return self.fd
     
     def getattr(self, path, fh=None):
+        try:
+            f = self.temporary_files[path]
+        except KeyError:
+            pass
+        else:
+            st = os.lstat(f.name)
+            return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+                'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+            
         if path not in self.path_files:
             raise FuseOSError(ENOENT)
+            
         file = self._get_file_by_path(path)
         return file.stat
     
@@ -114,6 +140,19 @@ class PutioFS(LoggingMixIn, Operations):
         children = self._children(f)
         return ['.', '..'] + [str(c) for c in children]
     
+    def release(self, path, fh):
+        f = self.temporary_files[path]
+        temppath = f.name
+        f.close()
+        
+        try:
+            filename = os.path.basename(path)
+            newfile = client.File.upload(temppath, filename)
+            self._add_to_files(newfile)
+        finally:
+            os.remove(temppath)
+            del self.temporary_files[path]
+
     # def rename(self, old, new):
     #         self.files[new] = self.files.pop(old)
     #     
@@ -134,10 +173,11 @@ class PutioFS(LoggingMixIn, Operations):
     #         self.files[path]['st_atime'] = atime
     #         self.files[path]['st_mtime'] = mtime
     #     
-    #     def write(self, path, data, offset, fh):
-    #         self.data[path] = self.data[path][:offset] + data
-    #         self.files[path]['st_size'] = len(self.data[path])
-    #         return len(data)
+    def write(self, path, data, offset, fh):
+        f = self.temporary_files[path]
+        f.seek(offset)
+        f.write(data)
+        return len(data)
 
 
 if __name__ == "__main__":
@@ -145,6 +185,9 @@ if __name__ == "__main__":
     parser.add_argument('mount_point')
     parser.add_argument('oauth_token')
     args = parser.parse_args()
+    
+    logger = logging.getLogger('putio2')
+    logging.basicConfig(level=logging.DEBUG)
     
     client = putio2.Client(args.oauth_token)
     
