@@ -61,7 +61,10 @@ class PutioFS(LoggingMixIn, Operations):
             size = file.size
             
         file.stat = dict(st_mode=mode , st_ctime=now,
-            st_mtime=now, st_atime=now, st_nlink=2, st_size=size)
+            st_mtime=now, st_atime=now, st_nlink=2,
+            st_size=size, st_blksize=1000000)
+            # st_blksize a filesystem-specific preferred I/O block size for this object.
+            # but, nobody seems to respect it.
             
     def _construct_path(self, file):
         '''For given file, returns the path to the mount point'''
@@ -88,16 +91,7 @@ class PutioFS(LoggingMixIn, Operations):
     
     def _children(self, file):
         return filter(lambda f: f.parent_id == file.id, self.files.values())
-        
-    # def chmod(self, path, mode):
-    #         self.files[path]['st_mode'] &= 0770000
-    #         self.files[path]['st_mode'] |= mode
-    #         return 0
-    # 
-    #     def chown(self, path, uid, gid):
-    #         self.files[path]['st_uid'] = uid
-    #         self.files[path]['st_gid'] = gid
-    #     
+         
     def create(self, path, mode):
         if path in self.temporary_files:
             raise FuseOSError(EROFS)
