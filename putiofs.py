@@ -121,10 +121,11 @@ class PutioFS(LoggingMixIn, Operations):
         file = self._get_file_by_path(path)
         return file.stat
     
-    # def mkdir(self, path, mode):
-    #         self.files[path] = dict(st_mode=(S_IFDIR | mode), st_nlink=2,
-    #                 st_size=0, st_ctime=time(), st_mtime=time(), st_atime=time())
-    #         self.files['/']['st_nlink'] += 1
+    def mkdir(self, path, mode):
+        dirname, basename = os.path.split(path)
+        parent = self._get_file_by_path(dirname)
+        newdir = client.File.create_folder(parent_id=parent.id)
+        self._add_to_files(newdir)
 
     def open(self, path, flags):
         self.fd += 1
@@ -157,12 +158,19 @@ class PutioFS(LoggingMixIn, Operations):
                 os.remove(temppath)
                 del self.temporary_files[path]
 
-    # def rename(self, old, new):
-    #         self.files[new] = self.files.pop(old)
-    #     
-    #     def rmdir(self, path):
-    #         self.files.pop(path)
-    #         self.files['/']['st_nlink'] -= 1
+    def rename(self, old, new):
+        f = self._get_file_by_path(old)
+        f.rename(new)
+        del self.path_files[path]
+        newpath = self._construct_path(f)
+        self.path_files[path] = f
+         
+    def rmdir(self, path):
+        f = self._get_file_by_path(path)
+        id = f.id
+        f.delete()
+        del self.files[id]
+        del self.path_files[path]
     
     def statfs(self, path):
         return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
