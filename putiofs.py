@@ -60,11 +60,15 @@ class PutioFS(LoggingMixIn, Operations):
             mode = (S_IFREG | 0400)
             size = file.size
             
-        file.stat = dict(st_mode=mode , st_ctime=now,
-            st_mtime=now, st_atime=now, st_nlink=2,
-            st_size=size, st_blksize=1000000)
+        file.stat = dict(
+            st_mode=mode,
+            st_ctime=now,
+            st_atime=now,
+            st_size=size,
+            st_blksize=1000000
             # st_blksize a filesystem-specific preferred I/O block size for this object.
             # but, nobody seems to respect it.
+        )
             
     def _construct_path(self, file):
         '''For given file, returns the path to the mount point'''
@@ -163,16 +167,6 @@ class PutioFS(LoggingMixIn, Operations):
     def statfs(self, path):
         return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
     
-    # def truncate(self, path, length, fh=None):
-    #         self.data[path] = self.data[path][:length]
-    #         self.files[path]['st_size'] = length
-    #     
-    #     def utimens(self, path, times=None):
-    #         now = time()
-    #         atime, mtime = times if times else (now, now)
-    #         self.files[path]['st_atime'] = atime
-    #         self.files[path]['st_mtime'] = mtime
-    #     
     def write(self, path, data, offset, fh):
         f = self.temporary_files[path]
         f.seek(offset)
