@@ -1,19 +1,71 @@
 #!/usr/bin/env python
 import argparse
 import logging
-from errno import ENOENT, EROFS, ENOTSUP, EIO
-from stat import S_IFDIR
+from time import time
+from errno import ENOENT, EROFS, ENOTSUP, EIO, EACCES, EBADF
+from stat import S_IFDIR, S_IFREG, S_IRUSR, S_IXUSR
+from os import R_OK, W_OK, X_OK, F_OK
+import os.path
+import calendar
+import platform
 
 import putio
 from fuse import FUSE, LoggingMixIn, Operations, FuseOSError
+
+now = time()
 
 
 class PutioFS(LoggingMixIn, Operations):
 
     def __init__(self):
-        pass
+        self._cache = {}  # path:str -> file:File
+        # self.cache["/"] = client.File.get(0)
+
+    def _get_file(self, path):
+        """Get file from cache, if not in cache, fetch and fill cache."""
+
+        # OS X makes unnecessary requests to these file names.
+        if platform.system() == 'Darwin':
+            name = os.path.basename(path).upper()
+            if name in ('._.', '.DS_STORE'):
+                raise FuseOSError(ENOENT)
+
+        path = path.rstrip('/')
+        try:
+            return self._cache[path]
+        except KeyError:
+            if path == '':
+                root = client.File.get(0)
+                root.path = '/'
+                self._cache[path] = root
+                return root
+            parent_path = os.path.dirname(path)
+            parent = self._get_file(parent_path)
+            self._cache[parent_path] = parent
+            self._get_children(parent)
+            try:
+                return self._cache[path]
+            except KeyError:
+                raise FuseOSError(ENOENT)
+
+    def _get_children(self, f):
+        try:
+            f.children
+        except AttributeError:
+            f.children = f.dir()
+        for child in f.children:
+            child.path = os.path.join(f.path, child.name)
+            self._cache[child.path] = child
+        return f.children
 
     def access(self, path, amode):
+        for name in walk_up(path):
+            if amode & (F_OK | R_OK | W_OK | X_OK):
+                f = self._get_file(name)
+                if amode & W_OK:
+                    raise FuseOSError(EACCES)
+                if amode & X_OK and f.content_type != 'application/x-directory':
+                    raise FuseOSError(EACCES)
         return 0
 
     bmap = None
@@ -60,13 +112,24 @@ class PutioFS(LoggingMixIn, Operations):
         concerning st_nlink of directories. Mac OS X counts all files inside
         the directory, while Linux counts only the subdirectories.
         """
+        f = self._get_file(path)
 
-        if path != '/':
-            raise FuseOSError(ENOENT)
-        return dict(st_mode=(S_IFDIR | 0755), st_nlink=2)
+        if f.content_type == 'application/x-directory':
+            mode = S_IFDIR | S_IRUSR | S_IXUSR
+            size = 0
+            nlink = 2  # TODO
+        else:
+            mode = S_IFREG | S_IRUSR
+            size = f.size
+            nlink = 1
 
-    def getxattr(self, path, name, position=0):
-        raise FuseOSError(ENOTSUP)
+        if f.created_at:
+            ctime = calendar.timegm(f.created_at.timetuple())
+        else:
+            ctime = now
+
+        return dict(st_mode=mode, st_nlink=nlink, st_size=size,
+                    st_ctime=ctime, st_mtime=ctime, st_atime=now)
 
     def init(self, path):
         """
@@ -109,7 +172,7 @@ class PutioFS(LoggingMixIn, Operations):
     def opendir(self, path):
         """Returns a numerical file handle."""
 
-        return 0
+        return self._get_file(path).id
 
     def read(self, path, size, offset, fh):
         """Returns a string containing the data requested."""
@@ -122,7 +185,11 @@ class PutioFS(LoggingMixIn, Operations):
         tuples. attrs is a dict as in getattr.
         """
 
-        return ['.', '..']
+        f = self._get_file(path)
+        if fh != f.id:
+            raise FuseOSError(EBADF)
+        children = self._get_children(f)
+        return ['.', '..'] + [c.name for c in children]
 
     def readlink(self, path):
         raise FuseOSError(ENOENT)
@@ -154,7 +221,7 @@ class PutioFS(LoggingMixIn, Operations):
         (minimum 512).
         """
 
-        return {}
+        return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
 
     def symlink(self, target, source):
         """creates a symlink `target -> source` (e.g. ln -s source target)"""
@@ -174,6 +241,20 @@ class PutioFS(LoggingMixIn, Operations):
 
     def write(self, path, data, offset, fh):
         raise FuseOSError(EROFS)
+
+
+def walk_up(path):
+    path = path.rstrip('/')
+    while True:
+        head, tail = os.path.split(path)
+        if tail:
+            yield path
+        if head == '/':
+            yield head
+            break
+        elif head == '':
+            break
+        path = head
 
 
 if __name__ == "__main__":
